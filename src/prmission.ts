@@ -1,20 +1,27 @@
 import { ethers } from "ethers";
-import { PrmissionClient, parseUsdc, formatUsdc } from "./sdk/index.js";
+import {
+  PrmissionClient,
+  PrmissionWriteClient,
+  parseUsdc,
+  formatUsdc,
+} from "prmission-sdk";
 import { config } from "./config.js";
 
-// ─── Client Factory ───────────────────────────────────────────────────────────
+// ─── Client singletons ────────────────────────────────────────────────────────
 
 let _readClient: PrmissionClient | null = null;
-let _writeClient: PrmissionClient | null = null;
+let _writeClient: PrmissionWriteClient | null = null;
 
-/** Returns a singleton read-only client (no signer). */
+/** Returns a singleton read-only client. */
 export function getReadClient(): PrmissionClient {
   if (!_readClient) {
-    _readClient = new PrmissionClient({
-      contractAddress: config.contractAddress,
-      rpcUrl: config.rpcUrl,
-      chainId: config.chainId,
-    });
+    const result = PrmissionClient.create(config.sdkConfig);
+    if (!result.ok) {
+      throw new Error(
+        `Failed to initialize Prmission client: [${result.error.code}] ${result.error.message}`
+      );
+    }
+    _readClient = result.value;
   }
   return _readClient;
 }
@@ -23,24 +30,23 @@ export function getReadClient(): PrmissionClient {
  * Returns a singleton write client (signer attached).
  * Throws if AGENT_PRIVATE_KEY is not set.
  */
-export function getWriteClient(): PrmissionClient {
+export function getWriteClient(): PrmissionWriteClient {
   if (!config.agentPrivateKey) {
     throw new Error("Write tools are disabled: AGENT_PRIVATE_KEY is not set.");
   }
   if (!_writeClient) {
-    const provider = new ethers.JsonRpcProvider(config.rpcUrl);
+    const rpcUrl =
+      "rpcUrl" in config.sdkConfig && config.sdkConfig.rpcUrl
+        ? config.sdkConfig.rpcUrl
+        : "https://mainnet.base.org";
+    const provider = new ethers.JsonRpcProvider(rpcUrl);
     const wallet = new ethers.Wallet(config.agentPrivateKey, provider);
-    _writeClient = new PrmissionClient({
-      contractAddress: config.contractAddress,
-      rpcUrl: config.rpcUrl,
-      chainId: config.chainId,
-    });
-    _writeClient.connect(wallet);
+    _writeClient = getReadClient().withSigner(wallet);
   }
   return _writeClient;
 }
 
-// ─── Write Queue (nonce serialization) ───────────────────────────────────────
+// ─── Write queue (nonce serialization) ───────────────────────────────────────
 // All write operations are serialized through this queue to prevent nonce
 // collisions when multiple concurrent MCP tool calls hit the server.
 
@@ -48,26 +54,24 @@ let _writeQueueTail: Promise<unknown> = Promise.resolve();
 
 export function enqueueWrite<T>(fn: () => Promise<T>): Promise<T> {
   const next = _writeQueueTail.then(fn);
-  // Swallow errors on the tail so the queue never permanently stalls
   _writeQueueTail = next.catch(() => {});
   return next;
 }
 
-// ─── Input Helpers ────────────────────────────────────────────────────────────
+// ─── Input helpers ────────────────────────────────────────────────────────────
 
-/** Parse a string or number ID to bigint. Throws on invalid input. */
+/** Parse a decimal-string ID to bigint. Throws a clear error on bad input. */
 export function parseId(value: string): bigint {
   const trimmed = value.trim();
   if (!/^\d+$/.test(trimmed)) {
-    throw new Error(`Invalid ID "${value}": must be a non-negative integer string.`);
+    throw new Error(
+      `Invalid ID "${value}": must be a non-negative integer string.`
+    );
   }
   return BigInt(trimmed);
 }
 
-/**
- * Validate and checksum an Ethereum address.
- * Throws a user-friendly error on invalid input.
- */
+/** Validate and checksum an Ethereum address. */
 export function parseAddress(value: string): string {
   if (!ethers.isAddress(value)) {
     throw new Error(`Invalid Ethereum address: "${value}"`);
@@ -75,26 +79,28 @@ export function parseAddress(value: string): string {
   return ethers.getAddress(value);
 }
 
-/** Parse a human-readable USDC amount like "1.50" to raw bigint (6 decimals). */
 export { parseUsdc, formatUsdc };
 
-// ─── Response Helpers ─────────────────────────────────────────────────────────
+// ─── Response helpers ─────────────────────────────────────────────────────────
 
-/** Build a BaseScan transaction URL */
+/** Build a BaseScan transaction URL. */
 export function txUrl(hash: string): string {
   return `${config.basescanBase}/${hash}`;
 }
 
-/** Serialize bigint values for JSON (converts to string).
- * Always call this on objects you pass as `structuredContent`.
- */
-export function serializeBigInts(obj: Record<string, unknown>): Record<string, unknown> {
+/** Recursively convert bigints to strings for JSON serialization. */
+export function serializeBigInts(
+  obj: Record<string, unknown>
+): Record<string, unknown> {
   function serialize(val: unknown): unknown {
     if (typeof val === "bigint") return val.toString();
     if (Array.isArray(val)) return val.map(serialize);
     if (val !== null && typeof val === "object") {
       return Object.fromEntries(
-        Object.entries(val as Record<string, unknown>).map(([k, v]) => [k, serialize(v)])
+        Object.entries(val as Record<string, unknown>).map(([k, v]) => [
+          k,
+          serialize(v),
+        ])
       );
     }
     return val;

@@ -1,6 +1,6 @@
 {
   "name": "prmission-mcp",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Remote MCP server for the Prmission Protocol — consent-gated USDC escrow and settlement on Base",
   "type": "module",
   "engines": {
@@ -18,8 +18,10 @@
     "@modelcontextprotocol/sdk": "^1.10.2",
     "@types/express": "^5.0.0",
     "@types/node": "^22.0.0",
+    "dotenv": "^16.4.7",
     "ethers": "^6.13.0",
     "express": "^4.21.2",
+    "prmission-sdk": "github:GOSSII/prmission-ts-sdk",
     "typescript": "^5.7.3",
     "zod": "^3.23.8"
   },

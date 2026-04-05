@@ -8,7 +8,8 @@ import {
   formatUsdc,
   serializeBigInts,
 } from "../prmission.js";
-import { PermissionStatus, EscrowStatus } from "../sdk/index.js";
+import { PermissionStatus, EscrowStatus } from "prmission-sdk";
+import type { PrmissionError } from "prmission-sdk";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -23,6 +24,22 @@ function escrowStatusLabel(s: EscrowStatus): string {
 function formatTs(ts: bigint): string {
   if (ts === 0n) return "N/A";
   return new Date(Number(ts) * 1000).toISOString();
+}
+
+function errorResponse(error: PrmissionError) {
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: `Error [${error.code}]: ${error.message}`,
+      },
+    ],
+    structuredContent: {
+      error: error.code,
+      message: error.message,
+    } as Record<string, unknown>,
+    isError: true,
+  };
 }
 
 // ─── Tool Registration ────────────────────────────────────────────────────────
@@ -40,6 +57,7 @@ export function registerReadTools(server: McpServer): void {
         chainId: config.chainId,
         contractAddress: config.contractAddress,
         rpcUrl: config.rpcUrl,
+        usdcAddress: config.usdcAddress,
         basescanBase: config.basescanBase,
         writeEnabled: config.writeEnabled,
       };
@@ -51,12 +69,13 @@ export function registerReadTools(server: McpServer): void {
               `Network:   ${data.network} (chainId ${data.chainId})`,
               `Contract:  ${data.contractAddress}`,
               `RPC:       ${data.rpcUrl}`,
+              `USDC:      ${data.usdcAddress}`,
               `BaseScan:  ${data.basescanBase}`,
               `Write:     ${data.writeEnabled ? "ENABLED (agent wallet connected)" : "DISABLED (read-only mode)"}`,
             ].join("\n"),
           },
         ],
-        structuredContent: data,
+        structuredContent: data as unknown as Record<string, unknown>,
       };
     }
   );
@@ -70,7 +89,9 @@ export function registerReadTools(server: McpServer): void {
     async ({ permissionId }) => {
       const id = parseId(permissionId);
       const client = getReadClient();
-      const p = await client.getPermission(id);
+      const result = await client.getPermission(id);
+      if (!result.ok) return errorResponse(result.error);
+      const p = result.value;
 
       const structured = serializeBigInts({
         permissionId: p.permissionId.toString(),
@@ -117,7 +138,9 @@ export function registerReadTools(server: McpServer): void {
     async ({ escrowId }) => {
       const id = parseId(escrowId);
       const client = getReadClient();
-      const e = await client.getEscrow(id);
+      const result = await client.getEscrow(id);
+      if (!result.ok) return errorResponse(result.error);
+      const e = result.value;
 
       const structured = serializeBigInts({
         escrowId: e.escrowId.toString(),
@@ -166,7 +189,9 @@ export function registerReadTools(server: McpServer): void {
     async ({ escrowId }) => {
       const id = parseId(escrowId);
       const client = getReadClient();
-      const preview = await client.previewSettlement(id);
+      const result = await client.previewSettlement(id);
+      if (!result.ok) return errorResponse(result.error);
+      const preview = result.value;
 
       const structured = serializeBigInts({
         escrowId: id.toString(),
@@ -204,7 +229,9 @@ export function registerReadTools(server: McpServer): void {
       const id = parseId(permissionId);
       const addr = parseAddress(agentAddress);
       const client = getReadClient();
-      const access = await client.checkAccess(id, addr);
+      const result = await client.checkAccess(id, addr);
+      if (!result.ok) return errorResponse(result.error);
+      const access = result.value;
 
       const structured = serializeBigInts({
         permissionId: id.toString(),
@@ -240,12 +267,17 @@ export function registerReadTools(server: McpServer): void {
     async ({ address }) => {
       const addr = parseAddress(address);
       const client = getReadClient();
-      const raw = await client.getBalance(addr);
-      const formatted = formatUsdc(raw);
+      const result = await client.getBalance(addr);
+      if (!result.ok) return errorResponse(result.error);
+      const formatted = formatUsdc(result.value);
 
       return {
         content: [{ type: "text" as const, text: `USDC balance of ${addr}: ${formatted} USDC` }],
-        structuredContent: { address: addr, balanceUsdc: formatted, balanceRaw: raw.toString() },
+        structuredContent: {
+          address: addr,
+          balanceUsdc: formatted,
+          balanceRaw: result.value.toString(),
+        },
       };
     }
   );
@@ -258,7 +290,9 @@ export function registerReadTools(server: McpServer): void {
     { readOnlyHint: true },
     async () => {
       const client = getReadClient();
-      const fees = await client.getTotalProtocolFees();
+      const result = await client.getTotalProtocolFees();
+      if (!result.ok) return errorResponse(result.error);
+      const fees = result.value;
 
       return {
         content: [{ type: "text" as const, text: `Total protocol fees collected: ${fees.formatted} USDC` }],
@@ -275,11 +309,12 @@ export function registerReadTools(server: McpServer): void {
     { readOnlyHint: true },
     async () => {
       const client = getReadClient();
-      const treasury = await client.getTreasury();
+      const result = await client.getTreasury();
+      if (!result.ok) return errorResponse(result.error);
 
       return {
-        content: [{ type: "text" as const, text: `Treasury address: ${treasury}` }],
-        structuredContent: { treasury },
+        content: [{ type: "text" as const, text: `Treasury address: ${result.value}` }],
+        structuredContent: { treasury: result.value },
       };
     }
   );
@@ -297,7 +332,9 @@ export function registerReadTools(server: McpServer): void {
       const id = parseId(agentId);
       const addr = parseAddress(agentAddress);
       const client = getReadClient();
-      const trust = await client.checkAgentTrust(id, addr);
+      const result = await client.checkAgentTrust(id, addr);
+      if (!result.ok) return errorResponse(result.error);
+      const trust = result.value;
 
       const structured = serializeBigInts({
         agentId: id.toString(),

@@ -1,23 +1,37 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { config } from "../config.js";
 import {
   getReadClient,
   getWriteClient,
   enqueueWrite,
   parseId,
-  parseAddress,
   parseUsdc,
   formatUsdc,
-  txUrl,
   serializeBigInts,
 } from "../prmission.js";
-import { EscrowStatus } from "../sdk/index.js";
+import { EscrowStatus } from "prmission-sdk";
+import type { PrmissionError } from "prmission-sdk";
 
 // ─── Tool Registration ────────────────────────────────────────────────────────
 // These tools are only registered when AGENT_PRIVATE_KEY is configured.
 // All writes go through enqueueWrite() to serialize transactions and
 // prevent nonce collisions.
+
+function errorResponse(error: PrmissionError) {
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: `Error [${error.code}]: ${error.message}`,
+      },
+    ],
+    structuredContent: {
+      error: error.code,
+      message: error.message,
+    } as Record<string, unknown>,
+    isError: true,
+  };
+}
 
 export function registerWriteTools(server: McpServer): void {
   // ── prmission_ensure_allowance ────────────────────────────────────────────
@@ -30,15 +44,16 @@ export function registerWriteTools(server: McpServer): void {
     { destructiveHint: false },
     async ({ amountUsdc }) => {
       const amount = parseUsdc(amountUsdc);
-      const approved = await enqueueWrite(() => getWriteClient().ensureAllowance(amount));
+      const result = await enqueueWrite(() => getWriteClient().ensureAllowance(amount));
+      if (!result.ok) return errorResponse(result.error);
 
-      const text = approved
+      const text = result.value
         ? `Allowance approved: ${amountUsdc} USDC`
         : `Allowance already sufficient for ${amountUsdc} USDC — no transaction needed.`;
 
       return {
         content: [{ type: "text" as const, text }],
-        structuredContent: { approved, amountUsdc },
+        structuredContent: { approved: result.value, amountUsdc },
       };
     }
   );
@@ -58,9 +73,11 @@ export function registerWriteTools(server: McpServer): void {
       const amount = parseUsdc(amountUsdc);
       const aid = agentId ? parseId(agentId) : 0n;
 
-      const escrowId: bigint = await enqueueWrite(() =>
+      const result = await enqueueWrite(() =>
         getWriteClient().depositEscrow(pid, amount, aid)
       );
+      if (!result.ok) return errorResponse(result.error);
+      const escrowId = result.value;
 
       const text = [
         `Escrow deposited successfully.`,
@@ -97,7 +114,7 @@ export function registerWriteTools(server: McpServer): void {
       const eid = parseId(escrowId);
       const outcomeValue = parseUsdc(outcomeValueUsdc);
 
-      await enqueueWrite(() =>
+      const result = await enqueueWrite(() =>
         getWriteClient().reportOutcome({
           escrowId: eid,
           outcomeValue,
@@ -105,6 +122,7 @@ export function registerWriteTools(server: McpServer): void {
           outcomeDescription,
         })
       );
+      if (!result.ok) return errorResponse(result.error);
 
       const disputeWindowEnd = new Date(Date.now() + 86_400_000).toISOString();
 
@@ -142,8 +160,8 @@ export function registerWriteTools(server: McpServer): void {
     { destructiveHint: true },
     async ({ escrowId, reason }) => {
       const eid = parseId(escrowId);
-
-      await enqueueWrite(() => getWriteClient().disputeSettlement(eid, reason));
+      const result = await enqueueWrite(() => getWriteClient().disputeSettlement(eid, reason));
+      if (!result.ok) return errorResponse(result.error);
 
       const text = [
         `Dispute filed for Escrow #${eid}.`,
@@ -170,7 +188,9 @@ export function registerWriteTools(server: McpServer): void {
       const eid = parseId(escrowId);
 
       // Guard: check settlement eligibility before sending any tx
-      const escrow = await getReadClient().getEscrow(eid);
+      const escrowResult = await getReadClient().getEscrow(eid);
+      if (!escrowResult.ok) return errorResponse(escrowResult.error);
+      const escrow = escrowResult.value;
 
       if (escrow.status === EscrowStatus.SETTLED) {
         return {
@@ -188,9 +208,9 @@ export function registerWriteTools(server: McpServer): void {
 
         const text = [
           `Cannot settle Escrow #${eid} yet — dispute window is still open.`,
-          `  Status:            ${escrow.status === 2 ? "OUTCOME_REPORTED" : String(escrow.status)}`,
+          `  Status:              ${escrowStatusLabel(escrow.status)}`,
           `  Dispute window ends: ${endsAt}`,
-          `  Time remaining:    ~${hoursRemaining} hours (${secondsRemaining} seconds)`,
+          `  Time remaining:      ~${hoursRemaining} hours (${secondsRemaining} seconds)`,
           ``,
           `Try again after the dispute window closes.`,
         ].join("\n");
@@ -210,8 +230,12 @@ export function registerWriteTools(server: McpServer): void {
       }
 
       // Preview before settling so we can show the breakdown
-      const preview = await getReadClient().previewSettlement(eid);
-      await enqueueWrite(() => getWriteClient().settle(eid));
+      const previewResult = await getReadClient().previewSettlement(eid);
+      if (!previewResult.ok) return errorResponse(previewResult.error);
+      const preview = previewResult.value;
+
+      const settleResult = await enqueueWrite(() => getWriteClient().settle(eid));
+      if (!settleResult.ok) return errorResponse(settleResult.error);
 
       const text = [
         `Escrow #${eid} settled successfully.`,
@@ -243,8 +267,8 @@ export function registerWriteTools(server: McpServer): void {
     { destructiveHint: true },
     async ({ escrowId }) => {
       const eid = parseId(escrowId);
-
-      await enqueueWrite(() => getWriteClient().refundEscrow(eid));
+      const result = await enqueueWrite(() => getWriteClient().refundEscrow(eid));
+      if (!result.ok) return errorResponse(result.error);
 
       const text = `Escrow #${eid} refunded to agent wallet.`;
 
@@ -254,4 +278,10 @@ export function registerWriteTools(server: McpServer): void {
       };
     }
   );
+}
+
+// ─── Internal helper (used by prmission_settle) ───────────────────────────────
+
+function escrowStatusLabel(s: EscrowStatus): string {
+  return ["NONE", "FUNDED", "OUTCOME_REPORTED", "DISPUTED", "SETTLED", "REFUNDED"][s] ?? String(s);
 }

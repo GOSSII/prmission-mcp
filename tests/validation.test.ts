@@ -76,7 +76,7 @@ describe("parseAddress", () => {
 
 // ─── parseUsdc ────────────────────────────────────────────────────────────────
 
-import { parseUsdc, formatUsdc } from "../src/sdk/index.js";
+import { parseUsdc, formatUsdc } from "prmission-sdk";
 
 describe("parseUsdc / formatUsdc", () => {
   it("converts '1.00' → 1_000_000n", () => {
