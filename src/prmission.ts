@@ -1,5 +1,5 @@
 import { ethers } from "ethers";
-import { PrmissionClient, parseUsdc, formatUsdc } from "@prmission/sdk";
+import { PrmissionClient, parseUsdc, formatUsdc } from "./sdk/index.js";
 import { config } from "./config.js";
 
 // ─── Client Factory ───────────────────────────────────────────────────────────

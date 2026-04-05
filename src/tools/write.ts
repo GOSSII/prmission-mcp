@@ -12,7 +12,7 @@ import {
   txUrl,
   serializeBigInts,
 } from "../prmission.js";
-import { EscrowStatus } from "@prmission/sdk";
+import { EscrowStatus } from "../sdk/index.js";
 
 // ─── Tool Registration ────────────────────────────────────────────────────────
 // These tools are only registered when AGENT_PRIVATE_KEY is configured.

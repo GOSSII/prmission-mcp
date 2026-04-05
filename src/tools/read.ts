@@ -8,7 +8,7 @@ import {
   formatUsdc,
   serializeBigInts,
 } from "../prmission.js";
-import { PermissionStatus, EscrowStatus } from "@prmission/sdk";
+import { PermissionStatus, EscrowStatus } from "../sdk/index.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 

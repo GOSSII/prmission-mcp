@@ -4,7 +4,7 @@ services:
     runtime: node
     plan: free           # Upgrade to "starter" ($7/mo) for always-on
     region: oregon
-    buildCommand: npm ci && npm run build
+    buildCommand: npm ci --include=dev && npm run build
     startCommand: node dist/index.js
     healthCheckPath: /healthz
     envVars:
