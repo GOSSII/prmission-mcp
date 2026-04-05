@@ -92,6 +92,9 @@ export const config = {
   /** Block explorer tx base URL */
   basescanBase: BASESCAN_BASES[networkEnv] ?? BASESCAN_BASES["base-mainnet"],
 
+  /** Public base URL (used in OAuth discovery metadata) */
+  publicUrl: (process.env.PUBLIC_URL ?? "https://prmission-mcp.onrender.com").replace(/\/$/, ""),
+
   /** If set, write tools are enabled and txs are signed with this key */
   agentPrivateKey: process.env.AGENT_PRIVATE_KEY || undefined,
   /** If set, all /mcp requests must include: Authorization: Bearer <token> */

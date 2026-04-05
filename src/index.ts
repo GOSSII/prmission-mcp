@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import express, { type Request, type Response, type NextFunction } from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -6,9 +7,6 @@ import { registerReadTools } from "./tools/read.js";
 import { registerWriteTools } from "./tools/write.js";
 
 // ─── MCP Server Factory ───────────────────────────────────────────────────────
-// In stateless Streamable HTTP mode each request gets its own McpServer +
-// transport pair. McpServer does not support being connected to multiple
-// transports simultaneously, so we create a fresh one per request.
 
 function createMcpServer(): McpServer {
   const server = new McpServer({
@@ -25,17 +23,106 @@ function createMcpServer(): McpServer {
   return server;
 }
 
-// Log mode once at startup
 if (config.writeEnabled) {
   console.log("[prmission-mcp] Write tools enabled (agent wallet connected).");
 } else {
   console.log("[prmission-mcp] Read-only mode (no AGENT_PRIVATE_KEY set).");
 }
 
+// ─── OAuth 2.0 + PKCE (required by Claude.ai MCP connector) ──────────────────
+// In-memory short-lived code store (codes expire in 5 minutes).
+
+interface AuthCode {
+  challenge: string;
+  method: string;
+  redirectUri: string;
+  expiry: number;
+}
+const authCodes = new Map<string, AuthCode>();
+
+// Clean up expired codes every minute
+setInterval(() => {
+  const now = Date.now();
+  for (const [code, data] of authCodes) {
+    if (data.expiry < now) authCodes.delete(code);
+  }
+}, 60_000);
+
 // ─── Express App ──────────────────────────────────────────────────────────────
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// ── OAuth discovery ───────────────────────────────────────────────────────────
+app.get("/.well-known/oauth-authorization-server", (_req: Request, res: Response) => {
+  const base = config.publicUrl;
+  res.json({
+    issuer: base,
+    authorization_endpoint: `${base}/authorize`,
+    token_endpoint: `${base}/token`,
+    response_types_supported: ["code"],
+    grant_types_supported: ["authorization_code"],
+    code_challenge_methods_supported: ["S256"],
+  });
+});
+
+// ── OAuth authorize ───────────────────────────────────────────────────────────
+app.get("/authorize", (req: Request, res: Response) => {
+  const { redirect_uri, code_challenge, code_challenge_method, state } = req.query as Record<string, string>;
+
+  if (!redirect_uri || !code_challenge) {
+    res.status(400).send("Missing required OAuth parameters.");
+    return;
+  }
+
+  // Generate a one-time code and store it with the PKCE challenge
+  const code = crypto.randomBytes(32).toString("hex");
+  authCodes.set(code, {
+    challenge: code_challenge,
+    method: code_challenge_method ?? "S256",
+    redirectUri: redirect_uri,
+    expiry: Date.now() + 5 * 60 * 1000,
+  });
+
+  const callback = new URL(redirect_uri);
+  callback.searchParams.set("code", code);
+  if (state) callback.searchParams.set("state", state);
+
+  res.redirect(callback.toString());
+});
+
+// ── OAuth token ───────────────────────────────────────────────────────────────
+app.post("/token", (req: Request, res: Response) => {
+  const { code, code_verifier } = req.body as Record<string, string>;
+
+  if (!code || !code_verifier) {
+    res.status(400).json({ error: "invalid_request", error_description: "Missing code or code_verifier." });
+    return;
+  }
+
+  const stored = authCodes.get(code);
+  if (!stored || stored.expiry < Date.now()) {
+    res.status(400).json({ error: "invalid_grant", error_description: "Code expired or not found." });
+    return;
+  }
+
+  // Verify PKCE S256: BASE64URL(SHA256(code_verifier)) must equal code_challenge
+  const digest = crypto.createHash("sha256").update(code_verifier).digest("base64url");
+  if (digest !== stored.challenge) {
+    res.status(400).json({ error: "invalid_grant", error_description: "PKCE verification failed." });
+    return;
+  }
+
+  authCodes.delete(code);
+
+  // The access token IS the MCP bearer token (or a placeholder if auth is disabled)
+  res.json({
+    access_token: config.mcpAuthToken ?? "open",
+    token_type: "Bearer",
+    expires_in: 86400,
+  });
+});
 
 // ── Auth middleware ────────────────────────────────────────────────────────────
 function authMiddleware(req: Request, res: Response, next: NextFunction): void {
@@ -69,16 +156,12 @@ app.get("/healthz", (_req: Request, res: Response) => {
 });
 
 // ── MCP endpoint (Streamable HTTP, stateless) ─────────────────────────────────
-// Each request: new McpServer + new transport → connect → handle → close.
-// This is the correct pattern for stateless remote MCP servers.
-
 async function handleMcp(req: Request, res: Response): Promise<void> {
   const server = createMcpServer();
   const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: undefined, // stateless — no session IDs
+    sessionIdGenerator: undefined,
   });
 
-  // Clean up when the response finishes
   res.on("finish", () => {
     server.close().catch(() => {});
   });
@@ -106,7 +189,7 @@ app.listen(config.port, config.host, () => {
   console.log(`[prmission-mcp] Health check: http://${config.host}:${config.port}/healthz`);
   console.log(`[prmission-mcp] Network: ${config.network} | Contract: ${config.contractAddress}`);
   if (config.mcpAuthToken) {
-    console.log("[prmission-mcp] Auth: Bearer token required.");
+    console.log("[prmission-mcp] Auth: OAuth 2.0 + PKCE enabled.");
   }
 });
 
