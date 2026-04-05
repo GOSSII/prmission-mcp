@@ -5,7 +5,10 @@ import { config } from "./config.js";
 import { registerReadTools } from "./tools/read.js";
 import { registerWriteTools } from "./tools/write.js";
 
-// ─── MCP Server ───────────────────────────────────────────────────────────────
+// ─── MCP Server Factory ───────────────────────────────────────────────────────
+// In stateless Streamable HTTP mode each request gets its own McpServer +
+// transport pair. McpServer does not support being connected to multiple
+// transports simultaneously, so we create a fresh one per request.
 
 function createMcpServer(): McpServer {
   const server = new McpServer({
@@ -17,12 +20,16 @@ function createMcpServer(): McpServer {
 
   if (config.writeEnabled) {
     registerWriteTools(server);
-    console.log("[prmission-mcp] Write tools enabled (agent wallet connected).");
-  } else {
-    console.log("[prmission-mcp] Read-only mode (no AGENT_PRIVATE_KEY set).");
   }
 
   return server;
+}
+
+// Log mode once at startup
+if (config.writeEnabled) {
+  console.log("[prmission-mcp] Write tools enabled (agent wallet connected).");
+} else {
+  console.log("[prmission-mcp] Read-only mode (no AGENT_PRIVATE_KEY set).");
 }
 
 // ─── Express App ──────────────────────────────────────────────────────────────
@@ -31,7 +38,6 @@ const app = express();
 app.use(express.json());
 
 // ── Auth middleware ────────────────────────────────────────────────────────────
-// Applied only to /mcp routes when MCP_AUTH_TOKEN is configured.
 function authMiddleware(req: Request, res: Response, next: NextFunction): void {
   if (!config.mcpAuthToken) {
     next();
@@ -51,7 +57,7 @@ function authMiddleware(req: Request, res: Response, next: NextFunction): void {
 }
 
 // ── Health check ──────────────────────────────────────────────────────────────
-app.get("/healthz", (_req, res) => {
+app.get("/healthz", (_req: Request, res: Response) => {
   res.json({
     status: "ok",
     network: config.network,
@@ -62,59 +68,35 @@ app.get("/healthz", (_req, res) => {
   });
 });
 
-// ── MCP endpoint (Streamable HTTP) ────────────────────────────────────────────
-// We use stateless mode (sessionIdGenerator: undefined) — each POST request
-// gets a fresh transport. This is the recommended pattern for remote MCP servers
-// that don't need server-initiated pushes.
+// ── MCP endpoint (Streamable HTTP, stateless) ─────────────────────────────────
+// Each request: new McpServer + new transport → connect → handle → close.
+// This is the correct pattern for stateless remote MCP servers.
 
-const mcpServer = createMcpServer();
+async function handleMcp(req: Request, res: Response): Promise<void> {
+  const server = createMcpServer();
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined, // stateless — no session IDs
+  });
 
-app.post("/mcp", authMiddleware, async (req: Request, res: Response) => {
+  // Clean up when the response finishes
+  res.on("finish", () => {
+    server.close().catch(() => {});
+  });
+
   try {
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined, // stateless
-    });
-    await mcpServer.connect(transport);
+    await server.connect(transport);
     await transport.handleRequest(req, res, req.body);
   } catch (err) {
-    console.error("[mcp] POST error:", err);
+    console.error("[mcp] error:", err);
     if (!res.headersSent) {
       res.status(500).json({ error: "Internal server error" });
     }
   }
-});
+}
 
-// GET /mcp — used by SSE-capable clients and for the MCP handshake
-app.get("/mcp", authMiddleware, async (req: Request, res: Response) => {
-  try {
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
-    });
-    await mcpServer.connect(transport);
-    await transport.handleRequest(req, res);
-  } catch (err) {
-    console.error("[mcp] GET error:", err);
-    if (!res.headersSent) {
-      res.status(500).json({ error: "Internal server error" });
-    }
-  }
-});
-
-// DELETE /mcp — session teardown (no-op in stateless mode, but required by spec)
-app.delete("/mcp", authMiddleware, async (req: Request, res: Response) => {
-  try {
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
-    });
-    await mcpServer.connect(transport);
-    await transport.handleRequest(req, res);
-  } catch (err) {
-    console.error("[mcp] DELETE error:", err);
-    if (!res.headersSent) {
-      res.status(500).json({ error: "Internal server error" });
-    }
-  }
-});
+app.post("/mcp", authMiddleware, handleMcp);
+app.get("/mcp", authMiddleware, handleMcp);
+app.delete("/mcp", authMiddleware, handleMcp);
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 
