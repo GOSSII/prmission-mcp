@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: prmission-mcp
+    runtime: node
+    plan: free           # Upgrade to "starter" ($7/mo) for always-on
+    region: oregon
+    buildCommand: npm ci && npm run build
+    startCommand: node dist/index.js
+    healthCheckPath: /healthz
+    envVars:
+      - key: PORT
+        value: 10000       # Render assigns port 10000 to web services
+      - key: HOST
+        value: 0.0.0.0
+      - key: NODE_ENV
+        value: production
+      - key: PRMISSION_NETWORK
+        value: base-mainnet
+      - key: PRMISSION_RPC_URL
+        value: https://mainnet.base.org
+      - key: PRMISSION_CONTRACT_ADDRESS
+        value: "0x0c8B16a57524f4009581B748356E01e1a969223d"
+      # Secret env vars — set these in the Render dashboard, NOT here:
+      #   AGENT_PRIVATE_KEY   → enables write tools
+      #   MCP_AUTH_TOKEN      → enables Bearer token auth
